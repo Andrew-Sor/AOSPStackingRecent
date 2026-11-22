@@ -16,6 +16,18 @@ public class MainModule implements IXposedHookLoadPackage {
 
     private static final String PIXEL_LAUNCHER_PKG = "com.google.android.apps.nexuslauncher";
     private static final String AOSP_LAUNCHER_PKG = "com.android.launcher3";
+    // Lawnchair (github: app.lawnchair, market: ch.deletescape.lawnchair.plah, plus ".debug" variants).
+    // Lawnchair is a Launcher3/Quickstep fork that keeps the com.android.quickstep.* class names,
+    // so with QuickSwitch its own process draws Recents and the same hooks apply.
+    private static final String LAWNCHAIR_PKG_PREFIX = "app.lawnchair";
+    private static final String LAWNCHAIR_MARKET_PKG_PREFIX = "ch.deletescape.lawnchair";
+
+    private static boolean isTargetPackage(String pkgName) {
+        return pkgName.equals(PIXEL_LAUNCHER_PKG)
+                || pkgName.equals(AOSP_LAUNCHER_PKG)
+                || pkgName.startsWith(LAWNCHAIR_PKG_PREFIX)
+                || pkgName.startsWith(LAWNCHAIR_MARKET_PKG_PREFIX);
+    }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
@@ -23,7 +35,7 @@ public class MainModule implements IXposedHookLoadPackage {
         String processName = lpparam.processName;
 
         // 我们只关注 Pixel Launcher 或 AOSP Launcher3
-        if (pkgName.equals(PIXEL_LAUNCHER_PKG) || pkgName.equals(AOSP_LAUNCHER_PKG)) {
+        if (isTargetPackage(pkgName)) {
             // 进一步过滤进程：通常 Recents 逻辑运行在主进程或 :quickstep 进程中
             boolean isMainProcess = processName.equals(pkgName);
             boolean isQuickstepProcess = processName.endsWith(":quickstep");

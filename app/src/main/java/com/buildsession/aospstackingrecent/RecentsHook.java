@@ -42,6 +42,11 @@ public class RecentsHook {
     private Method getChildStartMethod;
     private Method getOffsetAdjustmentMethod;
 
+    // False on Android 13 based Quickstep (Lawnchair 14): translateTaskWhenDismissed does not exist there.
+    private boolean hasTranslateTaskWhenDismissed = true;
+    // True only if RecentsView itself overrides getPageSpacing() (see initHooks).
+    private boolean pageSpacingGetterHooked = false;
+
     public RecentsHook(ClassLoader classLoader) {
         this.classLoader = classLoader;
         this.prefs = new XSharedPreferences("com.buildsession.aospstackingrecent");
@@ -101,8 +106,15 @@ public class RecentsHook {
              }
 
              // Hook getPageSpacing to physically bring cards closer and reduce scroll distance
+             // NOTE: On Android 13 based Quickstep (e.g. Lawnchair 14) getPageSpacing() is declared in
+             // PagedView, which is also the base class of Workspace / WidgetPagedView. Hooking it would
+             // change the home screen too, and since it just returns mPageSpacing (which we write
+             // ourselves in updatePageSpacingField) the offset would be applied twice. So we only hook it
+             // when RecentsView itself overrides it, and otherwise only touch the mPageSpacing field.
              Method getPageSpacingMethod = findMethod(recentsViewClass, "getPageSpacing");
-             if (getPageSpacingMethod != null) {
+             pageSpacingGetterHooked = getPageSpacingMethod != null
+                     && getPageSpacingMethod.getDeclaringClass() == recentsViewClass;
+             if (pageSpacingGetterHooked) {
                  XposedBridge.hookMethod(getPageSpacingMethod, new XC_MethodHook() {
                      @Override
                      protected void afterHookedMethod(MethodHookParam param) throws Throwable {
@@ -133,12 +145,23 @@ public class RecentsHook {
              XposedBridge.hookAllMethods(recentsViewClass, "onGestureAnimationStart", entryHook);
 
              // Additional hooks for early state synchronization
-             XposedBridge.hookAllMethods(recentsViewClass, "onMeasure", new XC_MethodHook() {
-                 @Override
-                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                     updatePageSpacingField(param.thisObject);
-                 }
-             });
+             // onMeasure is declared in PagedView on Android 13 (not in RecentsView), so hook the declaring
+             // class and filter to RecentsView instances.
+             Class<?> onMeasureOwner = recentsViewClass;
+             while (onMeasureOwner != null
+                     && XposedHelpers.findMethodExactIfExists(onMeasureOwner, "onMeasure", int.class, int.class) == null) {
+                 onMeasureOwner = onMeasureOwner.getSuperclass();
+             }
+             if (onMeasureOwner != null && onMeasureOwner != View.class && onMeasureOwner != ViewGroup.class) {
+                 XposedBridge.hookAllMethods(onMeasureOwner, "onMeasure", new XC_MethodHook() {
+                     @Override
+                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                         if (recentsViewClass.isInstance(param.thisObject)) {
+                             updatePageSpacingField(param.thisObject);
+                         }
+                     }
+                 });
+             }
 
              XposedBridge.hookAllMethods(recentsViewClass, "onVisibilityChanged", new XC_MethodHook() {
                  @Override
@@ -281,11 +304,31 @@ public class RecentsHook {
                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_dismiss_until",
                                     SystemClock.uptimeMillis() + duration + 200L);
                         }
+                        // Android 13 has no translateTaskWhenDismissed(); the page distance Launcher uses for
+                        // the gap-closing slide is computed inline, so derive the same step here
+                        // (|scroll(page1) - scroll(page0)|) for the "physical linkage" logic.
+                        if (!hasTranslateTaskWhenDismissed && ((ViewGroup) param.thisObject).getChildCount() > 1) {
+                            int s0 = (int) XposedHelpers.callMethod(param.thisObject, "getScrollForPage", 0);
+                            int s1 = (int) XposedHelpers.callMethod(param.thisObject, "getScrollForPage", 1);
+                            float step = Math.abs(s1 - s0);
+                            if (step > 0f) {
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject,
+                                        "apple_last_scroll_step", step);
+                            }
+                        }
                     } catch (Throwable ignored) {
                     }
                 }
             });
 
+            hasTranslateTaskWhenDismissed = false;
+            for (Method m : recentsViewClass.getDeclaredMethods()) {
+                if (m.getName().equals("translateTaskWhenDismissed")) {
+                    hasTranslateTaskWhenDismissed = true;
+                    break;
+                }
+            }
+            XposedBridge.log("AOSPStackingRecent: translateTaskWhenDismissed present: " + hasTranslateTaskWhenDismissed);
             XposedBridge.hookAllMethods(recentsViewClass, "translateTaskWhenDismissed", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
@@ -785,25 +828,43 @@ public class RecentsHook {
 
     private void updatePageSpacingField(Object recentsView) {
         try {
-            int newSpacing;
-            try {
-                 newSpacing = (int) XposedHelpers.callMethod(recentsView, "getPageSpacing");
-             } catch (Throwable ignored) {
-                 prefs.reload();
-                 float spacingFactor = prefs.getFloat(KEY_SPACING, DEFAULT_SPACING);
-                 float deltaFactor = spacingFactor - DEFAULT_SPACING;
-                 newSpacing = Math.round(deltaFactor * 10f) - 120;
-             }
-            
-            // 1. Update the mPageSpacing field in PagedView
+            // 1. Locate the mPageSpacing field in PagedView
             Field f = XposedHelpers.findFieldIfExists(recentsView.getClass(), "mPageSpacing");
             if (f == null) {
                 f = XposedHelpers.findFieldIfExists(recentsView.getClass().getSuperclass(), "mPageSpacing");
             }
-            
+
             if (f != null) {
                 f.setAccessible(true);
                 int oldSpacing = f.getInt(recentsView);
+
+                int newSpacing;
+                if (pageSpacingGetterHooked) {
+                    // RecentsView overrides getPageSpacing() and our hook already returns the final value.
+                    try {
+                        newSpacing = (int) XposedHelpers.callMethod(recentsView, "getPageSpacing");
+                    } catch (Throwable ignored) {
+                        prefs.reload();
+                        float spacingFactor = prefs.getFloat(KEY_SPACING, DEFAULT_SPACING);
+                        float deltaFactor = spacingFactor - DEFAULT_SPACING;
+                        newSpacing = Math.round(deltaFactor * 10f) - 120;
+                    }
+                } else {
+                    // getPageSpacing() just returns mPageSpacing, so we must derive the value from the
+                    // *stock* spacing, otherwise every call would subtract another 120px. The stock value is
+                    // whatever the field holds unless it still equals what we wrote last time (Launcher
+                    // resets it via setPageSpacing(dp.overviewPageSpacing) in setInsets()).
+                    Object lastSetObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_spacing_set");
+                    Object lastBaseObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_spacing_base");
+                    int base = (lastSetObj instanceof Integer && lastBaseObj instanceof Integer
+                            && oldSpacing == (Integer) lastSetObj) ? (Integer) lastBaseObj : oldSpacing;
+                    prefs.reload();
+                    float spacingFactor = prefs.getFloat(KEY_SPACING, DEFAULT_SPACING);
+                    float deltaFactor = spacingFactor - DEFAULT_SPACING;
+                    newSpacing = base + Math.round(deltaFactor * 10f) - 120;
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_spacing_base", base);
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_spacing_set", newSpacing);
+                }
                 if (oldSpacing != newSpacing) {
                     f.setInt(recentsView, newSpacing);
                     

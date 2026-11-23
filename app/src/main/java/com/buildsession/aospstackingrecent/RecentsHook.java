@@ -200,6 +200,14 @@ public class RecentsHook {
                      // card stays hidden by the stock code and every end target animates as usual.
                      try {
                          if (param.args != null && param.args.length == 1 && param.args[0] instanceof Float
+                                 && isGestureActive(param.thisObject)) {
+                             XposedBridge.log("AOSPStackingRecent EVT setContentAlpha(" + param.args[0] + ") end="
+                                     + getEndTargetName(param.thisObject) + " sliding=" + isHomeSliding(param.thisObject));
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                     try {
+                         if (param.args != null && param.args.length == 1 && param.args[0] instanceof Float
                                  && (Float) param.args[0] < 1f
                                  && isGestureActive(param.thisObject)
                                 && (getEndTargetName(param.thisObject) == null || isHomeSliding(param.thisObject))) {
@@ -222,9 +230,20 @@ public class RecentsHook {
 
              // Start the "gather" animation the moment the finger is released into Overview, instead of
              // waiting for the next layout pass.
+             for (final String evName : new String[]{"onGestureAnimationStart", "onGestureAnimationEnd"}) {
+                 XposedBridge.hookAllMethods(recentsViewClass, evName, new XC_MethodHook() {
+                     @Override
+                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                         XposedBridge.log("AOSPStackingRecent EVT " + evName + " done, active="
+                                 + isGestureActive(param.thisObject) + " end=" + getEndTargetName(param.thisObject));
+                     }
+                 });
+             }
              XposedBridge.hookAllMethods(recentsViewClass, "onPrepareGestureEndAnimation", new XC_MethodHook() {
                  @Override
                  protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                     XposedBridge.log("AOSPStackingRecent EVT onPrepareGestureEndAnimation end="
+                             + getEndTargetName(param.thisObject) + " active=" + isGestureActive(param.thisObject));
                      try {
                          if ("RECENTS".equals(getEndTargetName(param.thisObject))) {
                              XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", "RECENTS");
@@ -697,6 +716,8 @@ public class RecentsHook {
                     XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_start", homeStart);
                     XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_until", homeStart + HOME_SLIDE_MS + 60L);
                 }
+                XposedBridge.log("AOSPStackingRecent EVT home-slide frame t=" + (frameNow - homeStart)
+                        + " active=" + isGestureActive(recentsView) + " hold=" + holdPhase);
                 float lin = clamp((frameNow - homeStart) / (float) HOME_SLIDE_MS, 0f, 1f);
                 homeT = 1f - (1f - lin) * (1f - lin) * (1f - lin);
             } else if (endTargetName == null) {

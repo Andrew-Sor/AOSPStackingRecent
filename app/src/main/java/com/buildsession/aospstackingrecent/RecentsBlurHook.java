@@ -55,6 +55,8 @@ public class RecentsBlurHook {
     private Method getStableStateMethod;
     private Method getWorkspaceScrimColorMethod;
     private Method getBackgroundColorMethod;
+    private Method getWorkspaceMethod;
+    private Method getWallpaperOffsetMethod;
     private Object overviewState;
 
     private long lastPrefsReload;
@@ -95,6 +97,17 @@ public class RecentsBlurHook {
             getWorkspaceScrimColorMethod = accessible(XposedHelpers.findMethodExactIfExists(launcherStateClass, "getWorkspaceScrimColor", launcherClass));
             getBackgroundColorMethod = accessible(XposedHelpers.findMethodExactIfExists(scrimViewClass, "getBackgroundColor"));
             overviewState = XposedHelpers.getStaticObjectField(launcherStateClass, "OVERVIEW");
+
+            // Optional: lets the blurred layer follow the home screen's wallpaper parallax.
+            // Without them we fall back to a centred crop.
+            Class<?> workspaceClass = XposedHelpers.findClassIfExists("com.android.launcher3.Workspace", classLoader);
+            getWorkspaceMethod = accessible(XposedHelpers.findMethodExactIfExists(launcherClass, "getWorkspace"));
+            if (workspaceClass != null) {
+                getWallpaperOffsetMethod = accessible(
+                        XposedHelpers.findMethodExactIfExists(workspaceClass, "getWallpaperOffsetForCenterPage"));
+            }
+            XposedBridge.log("AOSPStackingRecent: Blur: wallpaper parallax sync "
+                    + (getWorkspaceMethod != null && getWallpaperOffsetMethod != null ? "available" : "unavailable"));
 
             if (getStateManagerMethod == null || getStateMethod == null || getStableStateMethod == null
                     || getWorkspaceScrimColorMethod == null || getBackgroundColorMethod == null
@@ -179,24 +192,35 @@ public class RecentsBlurHook {
         int h = scrim.getHeight();
         if (w <= 0 || h <= 0) return;
 
-        // Centre-crop the wallpaper to the scrim's aspect ratio.
-        float viewAspect = w / (float) h;
-        float bmpAspect = bmp.getWidth() / (float) bmp.getHeight();
-        if (bmpAspect > viewAspect) {
-            int cropW = Math.round(bmp.getHeight() * viewAspect);
-            int left = (bmp.getWidth() - cropW) / 2;
-            srcRect.set(left, 0, left + cropW, bmp.getHeight());
-        } else {
-            int cropH = Math.round(bmp.getWidth() / viewAspect);
-            int top = (bmp.getHeight() - cropH) / 2;
-            srcRect.set(0, top, bmp.getWidth(), top + cropH);
-        }
+        // Crop the wallpaper the same way the system draws it behind the home screen: it is scaled so
+        // that it covers the screen, vertically centred, and slid horizontally by the parallax offset
+        // (0 = left edge, 1 = right edge). Lawnchair already computes that offset for the current page.
+        float offset = currentWallpaperOffset(launcher);
+        float scale = Math.max(w / (float) bmp.getWidth(), h / (float) bmp.getHeight());
+        float cropW = Math.min(bmp.getWidth(), w / scale);
+        float cropH = Math.min(bmp.getHeight(), h / scale);
+        float left = (bmp.getWidth() - cropW) * offset;
+        float top = (bmp.getHeight() - cropH) * 0.5f;
+        srcRect.set(Math.round(left), Math.round(top), Math.round(left + cropW), Math.round(top + cropH));
         dstRect.set(0, 0, w, h);
 
         bitmapPaint.setAlpha(Math.round(255f * progress));
         canvas.drawBitmap(bmp, srcRect, dstRect, bitmapPaint);
         if (dim > 0f) {
             canvas.drawColor(Color.argb(Math.round(255f * dim * progress), 0, 0, 0));
+        }
+    }
+
+    /** Horizontal wallpaper offset (0..1) of the page currently shown on the home screen; 0.5 if unknown. */
+    private float currentWallpaperOffset(Object launcher) {
+        if (getWorkspaceMethod == null || getWallpaperOffsetMethod == null) return 0.5f;
+        try {
+            Object workspace = getWorkspaceMethod.invoke(launcher);
+            if (workspace == null) return 0.5f;
+            float offset = (float) getWallpaperOffsetMethod.invoke(workspace);
+            return Float.isNaN(offset) ? 0.5f : clamp(offset, 0f, 1f);
+        } catch (Throwable t) {
+            return 0.5f;
         }
     }
 

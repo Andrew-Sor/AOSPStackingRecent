@@ -716,8 +716,18 @@ public class RecentsHook {
                     float gap = measuredSize * HOLD_GAP_FRACTION;
                     float delta = (focusSize + gap) - naturalStep;
                     holdExtra = new float[childCount];
+                    // Keep the gaps measured from the card of the running app: the live window follows the
+                    // finger, so neighbours must keep a constant distance from it instead of from the scroll
+                    // focus (otherwise they slide under the window while dragging sideways).
+                    float ref = fi;
                     for (int k = 0; k < n; k++) {
-                        holdExtra[taskChild[k]] = delta * (k - fi);
+                        if (recentsView.getChildAt(taskChild[k]) == hiddenRunning) {
+                            ref = k;
+                            break;
+                        }
+                    }
+                    for (int k = 0; k < n; k++) {
+                        holdExtra[taskChild[k]] = delta * (k - ref);
                     }
                 }
             }

@@ -705,6 +705,37 @@ public class RecentsHook {
                 }
             }
 
+            // Diagnostics (throttled): lets us see what the hold layout really does on the device.
+            try {
+                Object lastLogObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_log");
+                long lastLog = lastLogObj instanceof Long ? (Long) lastLogObj : 0L;
+                if (isGestureActive(recentsView) && frameNow - lastLog > 150) {
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_last_log", frameNow);
+                    StringBuilder sb = new StringBuilder("AOSPStackingRecent DIAG hold=").append(holdPhase)
+                            .append(" gather=").append(gathering).append(" end=").append(endTargetName)
+                            .append(" rvVis=").append(recentsView.getVisibility())
+                            .append(" rvAlpha=").append(recentsView.getAlpha())
+                            .append(" rvScale=").append(recentsView.getScaleX())
+                            .append(" rvTx=").append(recentsView.getTranslationX())
+                            .append(" W=").append(recentsView.getWidth())
+                            .append(" center=").append(center).append(" measured=").append(measuredSize)
+                            .append(" holdExtra=").append(holdExtra != null)
+                            .append(" hiddenRunning=").append(hiddenRunning != null);
+                    for (int i = 0; i < childCount; i++) {
+                        View c = recentsView.getChildAt(i);
+                        if (c == null || !taskViewClass.isInstance(c)) continue;
+                        sb.append(" | #").append(i).append(" l=").append(c.getLeft()).append(" w=").append(c.getWidth())
+                                .append(" tx=").append(c.getTranslationX()).append(" a=").append(c.getAlpha())
+                                .append(" vis=").append(c.getVisibility())
+                                .append(" sc=").append(c.getScaleX())
+                                .append(" he=").append(holdExtra != null ? holdExtra[i] : Float.NaN);
+                    }
+                    XposedBridge.log(sb.toString());
+                }
+            } catch (Throwable t) {
+                XposedBridge.log("AOSPStackingRecent DIAG failed: " + t);
+            }
+
             // First pass: Calculate distance and weights for all cards
             for (int i = 0; i < childCount; i++) {
                 View child = recentsView.getChildAt(i);

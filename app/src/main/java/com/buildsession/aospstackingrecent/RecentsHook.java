@@ -145,17 +145,80 @@ public class RecentsHook {
                      boolean enteringOverview = name.equals("onStateTransitionStart")
                              && param.args != null && param.args.length > 0
                              && overviewStateClass != null && overviewStateClass.isInstance(param.args[0]);
-                     if (newGesture || enteringOverview) {
+                     // Entering the Overview state is part of the release animation of a gesture, so it must not
+                     // cancel the "gather" animation (that made the cards stop short and then snap into place).
+                     if (newGesture || (enteringOverview && !isGestureActive(param.thisObject))) {
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_forced_hidden_view", null);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gesture_running_view", null);
-                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until", 0L);
-                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", null);
                      }
                      if (newGesture) {
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until", 0L);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", null);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_was_hold", false);
                      }
                  }
              };
+
+             // Launcher keeps Recents "detached" from the app window while the finger is down: the content alpha is 0
+             // and every card beside the running one is pushed away by ADJACENT_PAGE_HORIZONTAL_OFFSET
+             // (updatePageOffsets). That is why no neighbouring card was visible. During a gesture (and the
+             // short "gather" animation after it) the stock offset is neutralised, and the cards are placed by
+             // our own layout and smoothing instead, so the two animations no longer fight each other.
+             XposedBridge.hookAllMethods(recentsViewClass, "updatePageOffsets", new XC_MethodHook() {
+                 @Override
+                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                     try {
+                         if (!shouldNeutraliseStockOffsets(param.thisObject)) return;
+                         float stock = XposedHelpers.getFloatField(param.thisObject, "mAdjacentPageHorizontalOffset");
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_saved_adjacent_offset", stock);
+                         XposedHelpers.setFloatField(param.thisObject, "mAdjacentPageHorizontalOffset", 0f);
+                     } catch (Throwable ignored) {
+                     }
+                 }
+
+                 @Override
+                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                     try {
+                         Object saved = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_saved_adjacent_offset");
+                         if (saved instanceof Float) {
+                             XposedHelpers.setFloatField(param.thisObject, "mAdjacentPageHorizontalOffset", (Float) saved);
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_saved_adjacent_offset", null);
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                 }
+             });
+
+             // The stock fade sets the cards' alpha to 0 (content alpha); re-apply our layout right away so
+             // the neighbouring cards are not left invisible until the next scroll update.
+             XposedBridge.hookAllMethods(recentsViewClass, "setContentAlpha", new XC_MethodHook() {
+                 @Override
+                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                     try {
+                         if (isGestureActive(param.thisObject)) {
+                             XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                 }
+             });
+
+             // Start the "gather" animation the moment the finger is released into Overview, instead of
+             // waiting for the next layout pass.
+             XposedBridge.hookAllMethods(recentsViewClass, "onPrepareGestureEndAnimation", new XC_MethodHook() {
+                 @Override
+                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                     try {
+                         if ("RECENTS".equals(getEndTargetName(param.thisObject))) {
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", "RECENTS");
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until",
+                                     SystemClock.uptimeMillis() + GATHER_DURATION_MS);
+                             XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                 }
+             });
 
              // When a swipe ends by switching to ANOTHER app (end target NEW_TASK), Launcher "un-hides" the
              // card of the app we are leaving (setRunningTaskHidden(false)). With the stack layout that
@@ -455,6 +518,13 @@ public class RecentsHook {
     /** True when the current swipe is ending by switching to another app (GestureEndTarget.NEW_TASK). */
     private static boolean isNewTaskEndTarget(Object recentsView) {
         return "NEW_TASK".equals(getEndTargetName(recentsView));
+    }
+
+    /** True while our own layout / gather animation owns the horizontal card offsets. */
+    private static boolean shouldNeutraliseStockOffsets(Object recentsView) {
+        if (isGestureActive(recentsView)) return true;
+        Object until = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gather_until");
+        return until instanceof Long && SystemClock.uptimeMillis() < (Long) until;
     }
 
     private static float easeTo(float current, float target, float factor) {

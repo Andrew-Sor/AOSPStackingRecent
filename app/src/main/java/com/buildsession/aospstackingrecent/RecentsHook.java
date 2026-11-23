@@ -457,6 +457,10 @@ public class RecentsHook {
         return "NEW_TASK".equals(getEndTargetName(recentsView));
     }
 
+    private static float easeTo(float current, float target, float factor) {
+        return current + (target - current) * factor;
+    }
+
     /** True from the start of a swipe-up from an app until the whole gesture animation has finished. */
     private static boolean isGestureActive(Object recentsView) {
         try {
@@ -468,7 +472,8 @@ public class RecentsHook {
 
     // After the finger is released into Overview the hidden cards slide into the stack and fade in.
     private static final long GATHER_DURATION_MS = 450;
-    private static final long GATHER_REVEAL_MS = 250;
+    // Gap between neighbouring cards during the hold phase, as a fraction of the Recents size.
+    private static final float HOLD_GAP_FRACTION = 0.03f;
     private static final float GATHER_TAU_MS = 90f;
 
     private void handleUpdateCurveProperties(XC_MethodHook.MethodHookParam param) {
@@ -541,10 +546,10 @@ public class RecentsHook {
             View forcedHidden = forcedObj instanceof View ? (View) forcedObj : null;
 
             // --- Gesture "hold" phase -------------------------------------------------------------------
-            // While the finger is still down during a swipe from an app (no end target chosen yet) only the
-            // card in focus and one neighbour on each side (if present) are shown. The rest stay hidden at
-            // their natural, off-screen position. When the finger is released into Overview they slide in and
-            // gather into the stack (see "gather" below).
+            // While the finger is still down during a swipe from an app (no end target chosen yet) the cards
+            // are laid out in a plain line with a small, constant gap between neighbours: no stacking, scaling
+            // or fading. Cards further away simply stay beyond the screen edges. When the finger is released
+            // into Overview every card slides from that line into the stack ("gather").
             long frameNow = SystemClock.uptimeMillis();
             String endTargetName = getEndTargetName(recentsView);
             boolean holdPhase = isGestureActive(recentsView) && !"RECENTS".equals(endTargetName);
@@ -556,59 +561,60 @@ public class RecentsHook {
             if (wasHold && !holdPhase) {
                 Object lastTarget = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_end_target");
                 if ("RECENTS".equals(lastTarget) || "RECENTS".equals(endTargetName)) {
-                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_gather_start", frameNow);
                     XposedHelpers.setAdditionalInstanceField(recentsView, "apple_gather_until", frameNow + GATHER_DURATION_MS);
                 }
             }
             XposedHelpers.setAdditionalInstanceField(recentsView, "apple_was_hold", holdPhase);
 
             Object gatherUntilObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gather_until");
-            Object gatherStartObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gather_start");
             long gatherUntil = gatherUntilObj instanceof Long ? (Long) gatherUntilObj : 0L;
-            long gatherStart = gatherStartObj instanceof Long ? (Long) gatherStartObj : 0L;
             boolean gathering = !holdPhase && frameNow < gatherUntil;
-            float gatherReveal = clamp((frameNow - gatherStart) / (float) GATHER_REVEAL_MS, 0f, 1f);
             Object lastCurveObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_curve_time");
             float dtMs = lastCurveObj instanceof Long ? clamp(frameNow - (Long) lastCurveObj, 1f, 64f) : 16f;
             XposedHelpers.setAdditionalInstanceField(recentsView, "apple_last_curve_time", frameNow);
             float gatherLerp = 1f - (float) Math.exp(-dtMs / GATHER_TAU_MS);
 
-            boolean[] holdHidden = new boolean[childCount];
+            // Extra translation (relative to the natural layout) that turns the natural layout into the
+            // linear hold layout, indexed by child index. null outside of the hold phase.
+            float[] holdExtra = null;
             if (holdPhase) {
-                // Focus = the card closest to the centre; neighbours = the previous / next task card.
-                int focusIdx = -1;
-                float bestAbs = Float.MAX_VALUE;
+                int n = 0;
+                int[] taskChild = new int[childCount];
+                float[] dist = new float[childCount];
+                float[] size = new float[childCount];
                 for (int i = 0; i < childCount; i++) {
                     View c = recentsView.getChildAt(i);
                     if (c == null || !taskViewClass.isInstance(c)) continue;
-                    float cCenter = (int) getChildStartMethod.invoke(handler, c)
-                            + (int) getMeasuredSizeMethod.invoke(handler, c) / 2f;
-                    float a = Math.abs(cCenter - center);
-                    if (a < bestAbs) {
-                        bestAbs = a;
-                        focusIdx = i;
-                    }
+                    int cSize = (int) getMeasuredSizeMethod.invoke(handler, c);
+                    taskChild[n] = i;
+                    size[n] = cSize;
+                    dist[n] = (int) getChildStartMethod.invoke(handler, c) + cSize / 2f - center;
+                    n++;
                 }
-                int prevIdx = -1;
-                int nextIdx = -1;
-                for (int i = focusIdx - 1; i >= 0; i--) {
-                    View c = recentsView.getChildAt(i);
-                    if (c != null && taskViewClass.isInstance(c)) {
-                        prevIdx = i;
-                        break;
+                if (n >= 2) {
+                    // Fractional position of the screen centre between the cards (0 .. n-1).
+                    int p = -1;
+                    for (int k = 0; k < n; k++) {
+                        if (dist[k] <= 0f) p = k;
                     }
-                }
-                for (int i = focusIdx + 1; i < childCount; i++) {
-                    View c = recentsView.getChildAt(i);
-                    if (c != null && taskViewClass.isInstance(c)) {
-                        nextIdx = i;
-                        break;
+                    float fi;
+                    if (p < 0) {
+                        fi = 0f;
+                    } else if (p >= n - 1) {
+                        fi = n - 1;
+                    } else {
+                        float span = dist[p + 1] - dist[p];
+                        fi = span > 1f ? p + (-dist[p]) / span : p;
                     }
-                }
-                for (int i = 0; i < childCount; i++) {
-                    View c = recentsView.getChildAt(i);
-                    holdHidden[i] = c != null && taskViewClass.isInstance(c)
-                            && i != focusIdx && i != prevIdx && i != nextIdx;
+                    int q = Math.max(0, Math.min(p, n - 2));
+                    float naturalStep = dist[q + 1] - dist[q];
+                    float focusSize = size[Math.max(0, Math.min(n - 1, Math.round(fi)))];
+                    float gap = measuredSize * HOLD_GAP_FRACTION;
+                    float delta = (focusSize + gap) - naturalStep;
+                    holdExtra = new float[childCount];
+                    for (int k = 0; k < n; k++) {
+                        holdExtra[taskChild[k]] = delta * (k - fi);
+                    }
                 }
             }
 
@@ -646,19 +652,6 @@ public class RecentsHook {
                     totalProgress = 0f;
                     weight = 1f;
                 }
-                if (holdHidden[i]) {
-                    // Hidden only until the finger is released: must not take part in the stack yet.
-                    totalProgress = 0f;
-                    weight = 0f;
-                } else if (gathering) {
-                    // Finger released into Overview: cards hidden so far are being revealed, so they
-                    // count as fully present even though their alpha is still 0 on the first frame.
-                    Object held = XposedHelpers.getAdditionalInstanceField(child, "apple_hold_hidden");
-                    if (held instanceof Boolean && (Boolean) held) {
-                        totalProgress = 0f;
-                        weight = 1f;
-                    }
-                }
                 XposedHelpers.setAdditionalInstanceField(child, "apple_dismiss_progress", totalProgress);
                 XposedHelpers.setAdditionalInstanceField(child, "apple_layout_weight", weight);
             }
@@ -682,26 +675,21 @@ public class RecentsHook {
                     continue;
                 }
 
-                // Hold phase: keep the card at its natural position, invisible.
-                if (holdHidden[i]) {
-                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", 0f);
-                    XposedHelpers.setAdditionalInstanceField(child, "apple_hold_hidden", true);
+                // Hold phase: plain linear layout with a small gap, nothing stacked, scaled or faded.
+                if (holdExtra != null) {
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", holdExtra[i]);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_target_z", 0f);
+                    child.setTranslationZ(0f);
                     child.setScaleX(1f);
                     child.setScaleY(1f);
-                    child.setAlpha(0f);
+                    if (child != forcedHidden) child.setAlpha(1f);
                     XposedHelpers.callMethod(child, "applyTranslationX");
                     continue;
                 }
 
-                // A card that was hidden during the hold phase slides into the stack and fades in now.
-                Object heldObj = XposedHelpers.getAdditionalInstanceField(child, "apple_hold_hidden");
-                boolean wasHeld = heldObj instanceof Boolean && (Boolean) heldObj;
-                if (wasHeld && !gathering) {
-                    XposedHelpers.setAdditionalInstanceField(child, "apple_hold_hidden", false);
-                    wasHeld = false;
-                }
-                boolean gatherThis = wasHeld && gathering;
-                float revealAlpha = gatherThis ? gatherReveal : 1f;
+                // Right after the finger is released into Overview every card eases from the linear layout
+                // into its place in the stack (offset, scale and alpha are smoothed for a short while).
+                boolean gatherThis = gathering;
 
                 // Reset for gone cards
                 if (selfWeight <= 0f && (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.01f)) {
@@ -793,10 +781,12 @@ public class RecentsHook {
                     
                     // Visual effects (Scale/Alpha) also use virtual distance for perfect synchronization
                     float visualProgress = Math.min(1.0f, absVirtualDistance / (measuredSize * 2.5f));
-                    float scale = 1.0f - (visualProgress * 0.20f);
+                    float targetScale = 1.0f - (visualProgress * 0.20f);
+                    float targetAlpha = 1.0f - (visualProgress * 0.2f);
+                    float scale = gatherThis ? easeTo(child.getScaleX(), targetScale, gatherLerp) : targetScale;
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha((1.0f - (visualProgress * 0.2f)) * revealAlpha);
+                    child.setAlpha(gatherThis ? easeTo(child.getAlpha(), targetAlpha, gatherLerp) : targetAlpha);
 
                     XposedHelpers.setAdditionalInstanceField(child, "apple_child_index", effectiveRank);
                     float targetZ = 100f - effectiveRank;
@@ -859,10 +849,12 @@ public class RecentsHook {
 
                     // Scale logic: make it slightly LARGER as it moves right to create depth hierarchy
                     float progress = Math.min(1.0f, absVirtualDistance / (measuredSize * 1.5f));
-                    float scale = 1.0f + (progress * 0.04f); 
+                    float targetScale = 1.0f + (progress * 0.04f);
+                    float targetAlpha = 1.0f - (progress * 0.02f);
+                    float scale = gatherThis ? easeTo(child.getScaleX(), targetScale, gatherLerp) : targetScale;
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha((1.0f - (progress * 0.02f)) * revealAlpha);
+                    child.setAlpha(gatherThis ? easeTo(child.getAlpha(), targetAlpha, gatherLerp) : targetAlpha);
                 }
 
                 if (!isDismissing && dismissTranslationXField != null) {

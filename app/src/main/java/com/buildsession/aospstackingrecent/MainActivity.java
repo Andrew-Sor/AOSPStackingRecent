@@ -76,6 +76,8 @@ public class MainActivity extends AppCompatActivity {
         }
         fixPermissions();
 
+        addBlurSettings(layout, prefs);
+
         TextView statusView = new TextView(this);
         statusView.setText("前往LSP管理器激活模块即可使用");
         statusView.setGravity(android.view.Gravity.CENTER);
@@ -98,6 +100,67 @@ public class MainActivity extends AppCompatActivity {
         layout.addView(githubView);
 
         setContentView(scrollView);
+    }
+
+    /** Settings for the blurred wallpaper behind Recents (see RecentsBlurHook). */
+    private void addBlurSettings(LinearLayout layout, final SharedPreferences prefs) {
+        TextView header = new TextView(this);
+        header.setText("Blurred wallpaper background");
+        header.setTextSize(18);
+        header.setTypeface(null, android.graphics.Typeface.BOLD);
+        header.setPadding(0, dpToPx(24), 0, dpToPx(8));
+        layout.addView(header);
+
+        android.widget.Switch toggle = new android.widget.Switch(this);
+        toggle.setText("Blur wallpaper behind Recents");
+        toggle.setChecked(prefs.getBoolean(RecentsBlurHook.KEY_BLUR_ENABLED, RecentsBlurHook.DEFAULT_BLUR_ENABLED));
+        toggle.setPadding(0, dpToPx(8), 0, dpToPx(8));
+        toggle.setOnCheckedChangeListener(new android.widget.CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(android.widget.CompoundButton b, boolean checked) {
+                prefs.edit().putBoolean(RecentsBlurHook.KEY_BLUR_ENABLED, checked).commit();
+                fixPermissions();
+            }
+        });
+        layout.addView(toggle);
+
+        addPercentSlider(layout, prefs, "Blur strength", RecentsBlurHook.KEY_BLUR_STRENGTH,
+                RecentsBlurHook.DEFAULT_BLUR_STRENGTH, 100);
+        addPercentSlider(layout, prefs, "Darkening", RecentsBlurHook.KEY_BLUR_DIM,
+                RecentsBlurHook.DEFAULT_BLUR_DIM, 90);
+    }
+
+    private void addPercentSlider(LinearLayout layout, final SharedPreferences prefs, final String title,
+                                  final String key, float defaultValue, int maxPercent) {
+        final TextView label = new TextView(this);
+        label.setPadding(0, dpToPx(12), 0, 0);
+        layout.addView(label);
+
+        int percent = Math.round(prefs.getFloat(key, defaultValue) * 100f);
+        label.setText(title + ": " + percent + "%");
+
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(maxPercent);
+        bar.setProgress(Math.min(percent, maxPercent));
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                label.setText(title + ": " + progress + "%");
+                if (fromUser) {
+                    prefs.edit().putFloat(key, progress / 100f).commit();
+                    fixPermissions();
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+        layout.addView(bar);
     }
 
     private void fixPermissions() {

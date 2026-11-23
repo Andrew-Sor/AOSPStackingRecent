@@ -44,6 +44,7 @@ public class MainModule implements IXposedHookLoadPackage {
                 XposedBridge.log("AOSPStackingRecent: Target launcher detected: " + pkgName + " (Process: " + processName + ")");
                 new RecentsHook(lpparam.classLoader).initHooks();
                 new NavBarHook(lpparam.classLoader).initHooks();
+                new RecentsBlurHook(lpparam.classLoader).initHooks();
             } else {
                 // 可选：记录忽略的进程，方便调试
                 XposedBridge.log("AOSPStackingRecent: Ignoring process " + processName + " for package " + pkgName);

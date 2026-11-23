@@ -148,6 +148,11 @@ public class RecentsHook {
                      if (newGesture || enteringOverview) {
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_forced_hidden_view", null);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gesture_running_view", null);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until", 0L);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", null);
+                     }
+                     if (newGesture) {
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_was_hold", false);
                      }
                  }
              };
@@ -318,12 +323,14 @@ public class RecentsHook {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                     try {
+                        long nowDraw = SystemClock.uptimeMillis();
                         Object untilObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_dismiss_until");
-                        if (untilObj instanceof Long) {
-                            long until = (Long) untilObj;
-                            if (SystemClock.uptimeMillis() < until) {
-                                XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
-                            }
+                        Object gatherObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_until");
+                        boolean dismissing = untilObj instanceof Long && nowDraw < (Long) untilObj;
+                        boolean gatheringNow = gatherObj instanceof Long && nowDraw < (Long) gatherObj;
+                        // Keep recomputing the stack every frame during dismiss and "gather" animations.
+                        if (dismissing || gatheringNow) {
+                            XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
                         }
                     } catch (Throwable ignored) {
                     }
@@ -435,15 +442,34 @@ public class RecentsHook {
         }
     }
 
-    /** True when the current swipe is ending by switching to another app (GestureEndTarget.NEW_TASK). */
-    private static boolean isNewTaskEndTarget(Object recentsView) {
+    /** Name of the GestureEndTarget chosen when the finger is released (RECENTS, NEW_TASK, ...); null while the finger is down. */
+    private static String getEndTargetName(Object recentsView) {
         try {
             Object target = XposedHelpers.getObjectField(recentsView, "mCurrentGestureEndTarget");
-            return target != null && "NEW_TASK".equals(String.valueOf(target));
+            return target == null ? null : String.valueOf(target);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** True when the current swipe is ending by switching to another app (GestureEndTarget.NEW_TASK). */
+    private static boolean isNewTaskEndTarget(Object recentsView) {
+        return "NEW_TASK".equals(getEndTargetName(recentsView));
+    }
+
+    /** True from the start of a swipe-up from an app until the whole gesture animation has finished. */
+    private static boolean isGestureActive(Object recentsView) {
+        try {
+            return XposedHelpers.getBooleanField(recentsView, "mGestureActive");
         } catch (Throwable t) {
             return false;
         }
     }
+
+    // After the finger is released into Overview the hidden cards slide into the stack and fade in.
+    private static final long GATHER_DURATION_MS = 450;
+    private static final long GATHER_REVEAL_MS = 250;
+    private static final float GATHER_TAU_MS = 90f;
 
     private void handleUpdateCurveProperties(XC_MethodHook.MethodHookParam param) {
         ViewGroup recentsView = (ViewGroup) param.thisObject;
@@ -514,6 +540,78 @@ public class RecentsHook {
             Object forcedObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_forced_hidden_view");
             View forcedHidden = forcedObj instanceof View ? (View) forcedObj : null;
 
+            // --- Gesture "hold" phase -------------------------------------------------------------------
+            // While the finger is still down during a swipe from an app (no end target chosen yet) only the
+            // card in focus and one neighbour on each side (if present) are shown. The rest stay hidden at
+            // their natural, off-screen position. When the finger is released into Overview they slide in and
+            // gather into the stack (see "gather" below).
+            long frameNow = SystemClock.uptimeMillis();
+            String endTargetName = getEndTargetName(recentsView);
+            boolean holdPhase = isGestureActive(recentsView) && !"RECENTS".equals(endTargetName);
+            Object wasHoldObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_was_hold");
+            boolean wasHold = wasHoldObj instanceof Boolean && (Boolean) wasHoldObj;
+            if (endTargetName != null) {
+                XposedHelpers.setAdditionalInstanceField(recentsView, "apple_last_end_target", endTargetName);
+            }
+            if (wasHold && !holdPhase) {
+                Object lastTarget = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_end_target");
+                if ("RECENTS".equals(lastTarget) || "RECENTS".equals(endTargetName)) {
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_gather_start", frameNow);
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_gather_until", frameNow + GATHER_DURATION_MS);
+                }
+            }
+            XposedHelpers.setAdditionalInstanceField(recentsView, "apple_was_hold", holdPhase);
+
+            Object gatherUntilObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gather_until");
+            Object gatherStartObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gather_start");
+            long gatherUntil = gatherUntilObj instanceof Long ? (Long) gatherUntilObj : 0L;
+            long gatherStart = gatherStartObj instanceof Long ? (Long) gatherStartObj : 0L;
+            boolean gathering = !holdPhase && frameNow < gatherUntil;
+            float gatherReveal = clamp((frameNow - gatherStart) / (float) GATHER_REVEAL_MS, 0f, 1f);
+            Object lastCurveObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_curve_time");
+            float dtMs = lastCurveObj instanceof Long ? clamp(frameNow - (Long) lastCurveObj, 1f, 64f) : 16f;
+            XposedHelpers.setAdditionalInstanceField(recentsView, "apple_last_curve_time", frameNow);
+            float gatherLerp = 1f - (float) Math.exp(-dtMs / GATHER_TAU_MS);
+
+            boolean[] holdHidden = new boolean[childCount];
+            if (holdPhase) {
+                // Focus = the card closest to the centre; neighbours = the previous / next task card.
+                int focusIdx = -1;
+                float bestAbs = Float.MAX_VALUE;
+                for (int i = 0; i < childCount; i++) {
+                    View c = recentsView.getChildAt(i);
+                    if (c == null || !taskViewClass.isInstance(c)) continue;
+                    float cCenter = (int) getChildStartMethod.invoke(handler, c)
+                            + (int) getMeasuredSizeMethod.invoke(handler, c) / 2f;
+                    float a = Math.abs(cCenter - center);
+                    if (a < bestAbs) {
+                        bestAbs = a;
+                        focusIdx = i;
+                    }
+                }
+                int prevIdx = -1;
+                int nextIdx = -1;
+                for (int i = focusIdx - 1; i >= 0; i--) {
+                    View c = recentsView.getChildAt(i);
+                    if (c != null && taskViewClass.isInstance(c)) {
+                        prevIdx = i;
+                        break;
+                    }
+                }
+                for (int i = focusIdx + 1; i < childCount; i++) {
+                    View c = recentsView.getChildAt(i);
+                    if (c != null && taskViewClass.isInstance(c)) {
+                        nextIdx = i;
+                        break;
+                    }
+                }
+                for (int i = 0; i < childCount; i++) {
+                    View c = recentsView.getChildAt(i);
+                    holdHidden[i] = c != null && taskViewClass.isInstance(c)
+                            && i != focusIdx && i != prevIdx && i != nextIdx;
+                }
+            }
+
             // First pass: Calculate distance and weights for all cards
             for (int i = 0; i < childCount; i++) {
                 View child = recentsView.getChildAt(i);
@@ -548,6 +646,19 @@ public class RecentsHook {
                     totalProgress = 0f;
                     weight = 1f;
                 }
+                if (holdHidden[i]) {
+                    // Hidden only until the finger is released: must not take part in the stack yet.
+                    totalProgress = 0f;
+                    weight = 0f;
+                } else if (gathering) {
+                    // Finger released into Overview: cards hidden so far are being revealed, so they
+                    // count as fully present even though their alpha is still 0 on the first frame.
+                    Object held = XposedHelpers.getAdditionalInstanceField(child, "apple_hold_hidden");
+                    if (held instanceof Boolean && (Boolean) held) {
+                        totalProgress = 0f;
+                        weight = 1f;
+                    }
+                }
                 XposedHelpers.setAdditionalInstanceField(child, "apple_dismiss_progress", totalProgress);
                 XposedHelpers.setAdditionalInstanceField(child, "apple_layout_weight", weight);
             }
@@ -570,6 +681,27 @@ public class RecentsHook {
                     XposedHelpers.setAdditionalInstanceField(child, "apple_target_z", 0f);
                     continue;
                 }
+
+                // Hold phase: keep the card at its natural position, invisible.
+                if (holdHidden[i]) {
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", 0f);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_hold_hidden", true);
+                    child.setScaleX(1f);
+                    child.setScaleY(1f);
+                    child.setAlpha(0f);
+                    XposedHelpers.callMethod(child, "applyTranslationX");
+                    continue;
+                }
+
+                // A card that was hidden during the hold phase slides into the stack and fades in now.
+                Object heldObj = XposedHelpers.getAdditionalInstanceField(child, "apple_hold_hidden");
+                boolean wasHeld = heldObj instanceof Boolean && (Boolean) heldObj;
+                if (wasHeld && !gathering) {
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_hold_hidden", false);
+                    wasHeld = false;
+                }
+                boolean gatherThis = wasHeld && gathering;
+                float revealAlpha = gatherThis ? gatherReveal : 1f;
 
                 // Reset for gone cards
                 if (selfWeight <= 0f && (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.01f)) {
@@ -648,9 +780,10 @@ public class RecentsHook {
                     // increase responsiveness to 1.0.
                     // We also blend the lerp factor to avoid sudden jumps.
                     float targetLerp = (dismissPullProgress > 0.01f && absVirtualDistance > 30f) ? 0.72f : 1.0f;
-                    float lerpFactor = currentOffsetObj != null ? 
+                    float lerpFactor = currentOffsetObj != null ?
                             (0.85f * targetLerp + 0.15f * 1.0f) : targetLerp; // Slight bias towards stability
-                    
+                    if (gatherThis) lerpFactor = gatherLerp; // slide in from the natural position
+
                     float smoothedOffset = currentOffset + (extraTranslation - currentOffset) * lerpFactor;
 
                     XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", smoothedOffset);
@@ -663,7 +796,7 @@ public class RecentsHook {
                     float scale = 1.0f - (visualProgress * 0.20f);
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha(1.0f - (visualProgress * 0.2f));
+                    child.setAlpha((1.0f - (visualProgress * 0.2f)) * revealAlpha);
 
                     XposedHelpers.setAdditionalInstanceField(child, "apple_child_index", effectiveRank);
                     float targetZ = 100f - effectiveRank;
@@ -718,7 +851,8 @@ public class RecentsHook {
                     
                     // Higher responsiveness for dismiss animations
                     float targetLerp = (dismissPullProgressRight > 0.01f && absVirtualDistance > 30f) ? 0.72f : 1.0f;
-                    float smoothedOffset = currentOffsetRight + (extraTranslation - currentOffsetRight) * (0.4f * targetLerp + 0.6f * 1.0f);
+                    float rightLerp = gatherThis ? gatherLerp : (0.4f * targetLerp + 0.6f * 1.0f);
+                    float smoothedOffset = currentOffsetRight + (extraTranslation - currentOffsetRight) * rightLerp;
 
                     XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", smoothedOffset);
                     XposedHelpers.callMethod(child, "applyTranslationX");
@@ -728,7 +862,7 @@ public class RecentsHook {
                     float scale = 1.0f + (progress * 0.04f); 
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha(1.0f - (progress * 0.02f));
+                    child.setAlpha((1.0f - (progress * 0.02f)) * revealAlpha);
                 }
 
                 if (!isDismissing && dismissTranslationXField != null) {

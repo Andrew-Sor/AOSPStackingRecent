@@ -132,12 +132,51 @@ public class RecentsHook {
              // Unify entry state: Hook onStateTransitionStart and onGestureAnimationStart
              // to ensure the internal mPageSpacing field is updated before any animation
              Class<?> launcherRecentsViewClass = XposedHelpers.findClassIfExists("com.android.quickstep.views.LauncherRecentsView", classLoader);
+             final Class<?> overviewStateClass = XposedHelpers.findClassIfExists(
+                     "com.android.launcher3.uioverrides.states.OverviewState", classLoader);
              XC_MethodHook entryHook = new XC_MethodHook() {
                  @Override
                  protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                      updatePageSpacingField(param.thisObject);
+                     // A new gesture, or entering Overview, ends the "quick switch left an old card
+                     // hidden" state (see the setRunningTaskHidden hook below).
+                     String name = param.method.getName();
+                     boolean newGesture = name.equals("onGestureAnimationStart");
+                     boolean enteringOverview = name.equals("onStateTransitionStart")
+                             && param.args != null && param.args.length > 0
+                             && overviewStateClass != null && overviewStateClass.isInstance(param.args[0]);
+                     if (newGesture || enteringOverview) {
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_forced_hidden_view", null);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gesture_running_view", null);
+                     }
                  }
              };
+
+             // When a swipe ends by switching to ANOTHER app (end target NEW_TASK), Launcher "un-hides" the
+             // card of the app we are leaving (setRunningTaskHidden(false)). With the stack layout that
+             // card is pulled towards the screen centre, so a sliver of it shows at the screen edge next to
+             // the new app. Keep that one card hidden until the next gesture / Overview.
+             XposedBridge.hookAllMethods(recentsViewClass, "setRunningTaskHidden", new XC_MethodHook() {
+                 @Override
+                 protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                     try {
+                         if (param.args == null || param.args.length != 1 || !(param.args[0] instanceof Boolean)
+                                 || (Boolean) param.args[0]) {
+                             return;
+                         }
+                         if (!isNewTaskEndTarget(param.thisObject)) return;
+                         Object card = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gesture_running_view");
+                         if (!(card instanceof View)) {
+                             card = getRunningTaskViewSafe(param.thisObject);
+                         }
+                         if (card instanceof View) {
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_forced_hidden_view", card);
+                             ((View) card).setAlpha(0f);
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                 }
+             });
 
              if (launcherRecentsViewClass != null) {
                  XposedBridge.hookAllMethods(launcherRecentsViewClass, "onStateTransitionStart", entryHook);
@@ -378,6 +417,34 @@ public class RecentsHook {
     private float lastTightnessFactor = -1;
     private long lastDismissHookLogUptime;
 
+    /** True while Launcher hides the running app's card during a swipe (the live app window is drawn instead). */
+    private static boolean isRunningTaskTileHidden(Object recentsView) {
+        try {
+            return XposedHelpers.getBooleanField(recentsView, "mRunningTaskTileHidden");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static View getRunningTaskViewSafe(Object recentsView) {
+        try {
+            Object v = XposedHelpers.callMethod(recentsView, "getRunningTaskView");
+            return v instanceof View ? (View) v : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** True when the current swipe is ending by switching to another app (GestureEndTarget.NEW_TASK). */
+    private static boolean isNewTaskEndTarget(Object recentsView) {
+        try {
+            Object target = XposedHelpers.getObjectField(recentsView, "mCurrentGestureEndTarget");
+            return target != null && "NEW_TASK".equals(String.valueOf(target));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private void handleUpdateCurveProperties(XC_MethodHook.MethodHookParam param) {
         ViewGroup recentsView = (ViewGroup) param.thisObject;
         if (recentsView == null) return;
@@ -435,10 +502,25 @@ public class RecentsHook {
 
             int childCount = recentsView.getChildCount();
 
+            // During a swipe from an app Launcher hides the running app's card (alpha 0) because the live
+            // app window is drawn instead. That card is still logically there, so the other cards must
+            // stack behind it exactly as if it were visible; otherwise the neighbouring card sits right under
+            // it with no offset and then jumps into place as soon as the card is shown again.
+            View hiddenRunning = isRunningTaskTileHidden(recentsView) ? getRunningTaskViewSafe(recentsView) : null;
+            if (hiddenRunning != null) {
+                XposedHelpers.setAdditionalInstanceField(recentsView, "apple_gesture_running_view", hiddenRunning);
+            }
+            // The card of the app we just left after a quick switch to another app: stays hidden.
+            Object forcedObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_forced_hidden_view");
+            View forcedHidden = forcedObj instanceof View ? (View) forcedObj : null;
+
             // First pass: Calculate distance and weights for all cards
             for (int i = 0; i < childCount; i++) {
                 View child = recentsView.getChildAt(i);
                 if (child == null || !taskViewClass.isInstance(child)) continue;
+                if (child == forcedHidden) {
+                    child.setAlpha(0f);
+                }
 
                 int childStart = (int) getChildStartMethod.invoke(handler, child);
                 int childSize = (int) getMeasuredSizeMethod.invoke(handler, child);
@@ -458,10 +540,15 @@ public class RecentsHook {
                 
                 // Total progress is the maximum of drag and alpha animations
                 float totalProgress = Math.max(dragProgress, alphaProgress);
-                XposedHelpers.setAdditionalInstanceField(child, "apple_dismiss_progress", totalProgress);
-                
+
                 // If it's completely gone, weight is 0. Otherwise, it's 1.0 -> 0.0
                 float weight = (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.05f) ? 0f : (1.0f - totalProgress);
+                if (child == hiddenRunning) {
+                    // Hidden only because of the live window, not dismissed: count it fully, no dismiss pull.
+                    totalProgress = 0f;
+                    weight = 1f;
+                }
+                XposedHelpers.setAdditionalInstanceField(child, "apple_dismiss_progress", totalProgress);
                 XposedHelpers.setAdditionalInstanceField(child, "apple_layout_weight", weight);
             }
 
@@ -476,6 +563,13 @@ public class RecentsHook {
 
                 float originalDistance = distanceObj;
                 float selfWeight = weightObj;
+
+                // The hidden running card keeps its place and is not restyled (that would make it visible).
+                if (child == hiddenRunning) {
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", 0f);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_target_z", 0f);
+                    continue;
+                }
 
                 // Reset for gone cards
                 if (selfWeight <= 0f && (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.01f)) {

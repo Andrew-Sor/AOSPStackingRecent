@@ -678,6 +678,23 @@ public class RecentsHook {
                     dist[n] = (int) getChildStartMethod.invoke(handler, c) + cSize / 2f - center;
                     n++;
                 }
+                // The layout can be mirrored (child 0 on the right), so order the cards by their on-screen
+                // position (ascending distance from the centre) before working out the linear layout.
+                for (int a = 1; a < n; a++) {
+                    int tc = taskChild[a];
+                    float td = dist[a];
+                    float ts = size[a];
+                    int b = a - 1;
+                    while (b >= 0 && dist[b] > td) {
+                        taskChild[b + 1] = taskChild[b];
+                        dist[b + 1] = dist[b];
+                        size[b + 1] = size[b];
+                        b--;
+                    }
+                    taskChild[b + 1] = tc;
+                    dist[b + 1] = td;
+                    size[b + 1] = ts;
+                }
                 if (n >= 2) {
                     // Fractional position of the screen centre between the cards (0 .. n-1).
                     int p = -1;

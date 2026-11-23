@@ -202,7 +202,7 @@ public class RecentsHook {
                          if (param.args != null && param.args.length == 1 && param.args[0] instanceof Float
                                  && (Float) param.args[0] < 1f
                                  && isGestureActive(param.thisObject)
-                                 && getEndTargetName(param.thisObject) == null) {
+                                && (getEndTargetName(param.thisObject) == null || isHomeSliding(param.thisObject))) {
                              param.args[0] = 1f;
                          }
                      } catch (Throwable ignored) {
@@ -407,7 +407,8 @@ public class RecentsHook {
                         Object untilObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_dismiss_until");
                         Object gatherObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_until");
                         boolean dismissing = untilObj instanceof Long && nowDraw < (Long) untilObj;
-                        boolean gatheringNow = gatherObj instanceof Long && nowDraw < (Long) gatherObj;
+                        boolean gatheringNow = (gatherObj instanceof Long && nowDraw < (Long) gatherObj)
+                                || isHomeSliding(param.thisObject);
                         // Keep recomputing the stack every frame during dismiss and "gather" animations.
                         if (dismissing || gatheringNow) {
                             XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
@@ -549,6 +550,16 @@ public class RecentsHook {
     }
 
     /** True from the start of a swipe-up from an app until the whole gesture animation has finished. */
+    private static boolean isHomeSliding(Object recentsView) {
+        try {
+            if (!"HOME".equals(getEndTargetName(recentsView))) return false;
+            Object until = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_home_until");
+            return until instanceof Long && SystemClock.uptimeMillis() < (Long) until;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static boolean isGestureActive(Object recentsView) {
         try {
             return XposedHelpers.getBooleanField(recentsView, "mGestureActive");
@@ -562,6 +573,7 @@ public class RecentsHook {
     // Gap between neighbouring cards during the hold phase, as a fraction of the Recents size.
     private static final float HOLD_GAP_FRACTION = 0.03f;
     private static final float GATHER_TAU_MS = 90f;
+    private static final long HOME_SLIDE_MS = 260;
 
     private void handleUpdateCurveProperties(XC_MethodHook.MethodHookParam param) {
         ViewGroup recentsView = (ViewGroup) param.thisObject;
@@ -663,6 +675,23 @@ public class RecentsHook {
 
             // Extra translation (relative to the natural layout) that turns the natural layout into the
             // linear hold layout, indexed by child index. null outside of the hold phase.
+            // Leaving to the home screen: the other cards slide off to their own side instead of vanishing.
+            float homeT = 0f;
+            if ("HOME".equals(endTargetName)) {
+                Object hs = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_home_start");
+                long homeStart;
+                if (hs instanceof Long) {
+                    homeStart = (Long) hs;
+                } else {
+                    homeStart = frameNow;
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_start", homeStart);
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_until", homeStart + HOME_SLIDE_MS + 60L);
+                }
+                float lin = clamp((frameNow - homeStart) / (float) HOME_SLIDE_MS, 0f, 1f);
+                homeT = 1f - (1f - lin) * (1f - lin) * (1f - lin);
+            } else if (endTargetName == null) {
+                XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_start", null);
+            }
             float[] holdExtra = null;
             if (holdPhase) {
                 int n = 0;
@@ -728,6 +757,9 @@ public class RecentsHook {
                     }
                     for (int k = 0; k < n; k++) {
                         holdExtra[taskChild[k]] = delta * (k - ref);
+                        if (homeT > 0f && k != ref) {
+                            holdExtra[taskChild[k]] += (k < ref ? -1f : 1f) * homeT * measuredSize * 1.3f;
+                        }
                     }
                 }
             }

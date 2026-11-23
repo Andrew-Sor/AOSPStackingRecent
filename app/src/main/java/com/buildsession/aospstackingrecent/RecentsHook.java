@@ -193,6 +193,23 @@ public class RecentsHook {
              // the neighbouring cards are not left invisible until the next scroll update.
              XposedBridge.hookAllMethods(recentsViewClass, "setContentAlpha", new XC_MethodHook() {
                  @Override
+                 protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                     // While the finger is still down the stock code keeps Recents fully transparent
+                     // (content alpha 0, which even makes RecentsView INVISIBLE), so the neighbouring cards
+                     // could never be seen. Keep the content visible during the hold phase; the running
+                     // card stays hidden by the stock code and every end target animates as usual.
+                     try {
+                         if (param.args != null && param.args.length == 1 && param.args[0] instanceof Float
+                                 && (Float) param.args[0] < 1f
+                                 && isGestureActive(param.thisObject)
+                                 && getEndTargetName(param.thisObject) == null) {
+                             param.args[0] = 1f;
+                         }
+                     } catch (Throwable ignored) {
+                     }
+                 }
+
+                 @Override
                  protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                      try {
                          if (isGestureActive(param.thisObject)) {

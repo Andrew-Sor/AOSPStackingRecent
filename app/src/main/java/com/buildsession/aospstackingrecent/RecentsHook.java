@@ -231,6 +231,16 @@ public class RecentsHook {
                              XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until",
                                      SystemClock.uptimeMillis() + GATHER_DURATION_MS);
                              XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                         } else if ("HOME".equals(getEndTargetName(param.thisObject))) {
+                             // Start the slide-out right here, not on the next layout pass: after a very fast
+                             // swipe Launcher fades Recents out before any further update would arrive.
+                             long t = SystemClock.uptimeMillis();
+                             if (!(XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_home_start") instanceof Long)) {
+                                 XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_start", t);
+                             }
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_until",
+                                     t + HOME_SLIDE_MS + 60L);
+                             XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
                          }
                      } catch (Throwable ignored) {
                      }

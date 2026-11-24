@@ -285,7 +285,12 @@ public class RecentsHook {
                                  || (Boolean) param.args[0]) {
                              return;
                          }
-                         if (!isNewTaskEndTarget(param.thisObject)) return;
+                         // Same for "home": the running card must not pop up while the app shrinks into its icon
+                         // (our slide-out keeps Recents' content visible for a moment after the gesture ended).
+                         boolean homePending = Boolean.TRUE.equals(
+                                 XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_home_pending"));
+                         if (!isNewTaskEndTarget(param.thisObject) && !homePending
+                                 && !"HOME".equals(getEndTargetName(param.thisObject))) return;
                          Object card = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gesture_running_view");
                          if (!(card instanceof View)) {
                              card = getRunningTaskViewSafe(param.thisObject);

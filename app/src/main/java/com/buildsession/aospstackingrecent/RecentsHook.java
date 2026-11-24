@@ -441,6 +441,9 @@ public class RecentsHook {
                         // Keep recomputing the stack every frame during dismiss and "gather" animations.
                         if (dismissing || gatheringNow) {
                             XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                            // Nothing else may invalidate the view (e.g. after a very fast swipe Launcher's own
+                            // fade never ticks), so ask for the next frame ourselves until the animation is over.
+                            ((View) param.thisObject).postInvalidateOnAnimation();
                         }
                     } catch (Throwable ignored) {
                     }

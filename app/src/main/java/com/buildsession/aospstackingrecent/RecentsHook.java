@@ -444,6 +444,16 @@ public class RecentsHook {
                             // Nothing else may invalidate the view (e.g. after a very fast swipe Launcher's own
                             // fade never ticks), so ask for the next frame ourselves until the animation is over.
                             ((View) param.thisObject).postInvalidateOnAnimation();
+                        } else if (gatherObj instanceof Long && (Long) gatherObj > 0L) {
+                            // The gather just ended: do one last exact layout pass (the last animated frame can
+                            // be a hair off, or computed while the running card was still fading in), otherwise
+                            // the cards keep slightly wrong sizes until the next scroll.
+                            Object doneObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_finalized");
+                            if (!(doneObj instanceof Long) || !doneObj.equals(gatherObj)) {
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_finalized", gatherObj);
+                                XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                                ((View) param.thisObject).postInvalidateOnAnimation();
+                            }
                         }
                     } catch (Throwable ignored) {
                     }

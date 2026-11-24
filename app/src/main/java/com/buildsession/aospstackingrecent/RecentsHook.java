@@ -157,6 +157,8 @@ public class RecentsHook {
                      }
                      if (newGesture) {
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gather_until", 0L);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_pending", false);
+                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_until", 0L);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_last_end_target", null);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_was_hold", false);
                      }
@@ -263,6 +265,7 @@ public class RecentsHook {
                              }
                              XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_until",
                                      t + HOME_SLIDE_MS + 60L);
+                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_pending", true);
                              XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
                          }
                      } catch (Throwable ignored) {
@@ -439,6 +442,18 @@ public class RecentsHook {
                         long nowDraw = SystemClock.uptimeMillis();
                         Object untilObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_dismiss_until");
                         Object gatherObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_until");
+                        // After a "home" swipe the stock fade-out was suppressed while our slide-out played;
+                        // hide Recents for real when it is over, or the cards stay on screen and take touches.
+                        if (Boolean.TRUE.equals(XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_home_pending"))) {
+                            Object hu = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_home_until");
+                            if (hu instanceof Long && nowDraw >= (Long) hu) {
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_home_pending", false);
+                                XposedHelpers.callMethod(param.thisObject, "setContentAlpha", 0f);
+                            } else {
+                                XposedHelpers.callMethod(param.thisObject, "updateCurveProperties");
+                                ((View) param.thisObject).postInvalidateOnAnimation();
+                            }
+                        }
                         boolean dismissing = untilObj instanceof Long && nowDraw < (Long) untilObj;
                         // (+600 ms: also keep the layout exact while Launcher fades the running card back in)
                         boolean gatheringNow = (gatherObj instanceof Long && nowDraw < (Long) gatherObj + 600L)
@@ -708,7 +723,12 @@ public class RecentsHook {
             // into Overview every card slides from that line into the stack ("gather").
             long frameNow = SystemClock.uptimeMillis();
             String endTargetName = getEndTargetName(recentsView);
-            boolean holdPhase = isGestureActive(recentsView) && !"RECENTS".equals(endTargetName);
+            // A very short "home" gesture can end before our slide-out has finished: keep playing it.
+            Object hpObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_home_pending");
+            Object huObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_home_until");
+            boolean homeWindow = Boolean.TRUE.equals(hpObj) && huObj instanceof Long && frameNow < (Long) huObj;
+            if (endTargetName == null && homeWindow) endTargetName = "HOME";
+            boolean holdPhase = (isGestureActive(recentsView) || homeWindow) && !"RECENTS".equals(endTargetName);
             Object wasHoldObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_was_hold");
             boolean wasHold = wasHoldObj instanceof Boolean && (Boolean) wasHoldObj;
             if (endTargetName != null) {

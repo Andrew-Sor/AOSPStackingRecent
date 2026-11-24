@@ -436,7 +436,8 @@ public class RecentsHook {
                         Object untilObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_dismiss_until");
                         Object gatherObj = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_until");
                         boolean dismissing = untilObj instanceof Long && nowDraw < (Long) untilObj;
-                        boolean gatheringNow = (gatherObj instanceof Long && nowDraw < (Long) gatherObj)
+                        // (+600 ms: also keep the layout exact while Launcher fades the running card back in)
+                        boolean gatheringNow = (gatherObj instanceof Long && nowDraw < (Long) gatherObj + 600L)
                                 || isHomeSliding(param.thisObject);
                         // Keep recomputing the stack every frame during dismiss and "gather" animations.
                         if (dismissing || gatheringNow) {

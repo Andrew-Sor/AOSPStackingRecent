@@ -858,7 +858,14 @@ public class RecentsHook {
 
                 // If it's completely gone, weight is 0. Otherwise, it's 1.0 -> 0.0
                 float weight = (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.05f) ? 0f : (1.0f - totalProgress);
-                if (child == hiddenRunning) {
+                // Right after the gesture the stock code fades the running card back in (alpha 0 -> 1). That
+                // must not be read as a dismissal, or the neighbouring card shrinks for a moment.
+                boolean unhidingRunning = false;
+                if (child != hiddenRunning && frameNow < gatherUntil + 600L && child != forcedHidden) {
+                    Object grv = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_gesture_running_view");
+                    unhidingRunning = grv == child && !isDismissing;
+                }
+                if (child == hiddenRunning || unhidingRunning) {
                     // Hidden only because of the live window, not dismissed: count it fully, no dismiss pull.
                     totalProgress = 0f;
                     weight = 1f;

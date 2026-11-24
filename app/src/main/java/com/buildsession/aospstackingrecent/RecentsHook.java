@@ -592,6 +592,16 @@ public class RecentsHook {
         return until instanceof Long && SystemClock.uptimeMillis() < (Long) until;
     }
 
+    /**
+     * Start value for the gather easing: our own last eased value. Reading it back from the view is wrong,
+     * because the stock updateCurveProperties rewrites scale/alpha right before our hook runs, so the easing
+     * would restart from the stock value every frame and then jump when the gather ends.
+     */
+    private static float gatherBase(View child, String key, float fallback) {
+        Object v = XposedHelpers.getAdditionalInstanceField(child, key);
+        return v instanceof Float ? (Float) v : fallback;
+    }
+
     private static float easeTo(float current, float target, float factor) {
         return current + (target - current) * factor;
     }
@@ -915,6 +925,8 @@ public class RecentsHook {
                     child.setTranslationZ(0f);
                     child.setScaleX(1f);
                     child.setScaleY(1f);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_scale", 1f);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_alpha", 1f);
                     if (child != forcedHidden) child.setAlpha(1f);
                     XposedHelpers.callMethod(child, "applyTranslationX");
                     continue;
@@ -1016,10 +1028,13 @@ public class RecentsHook {
                     float visualProgress = Math.min(1.0f, absVirtualDistance / (measuredSize * 2.5f));
                     float targetScale = 1.0f - (visualProgress * 0.20f);
                     float targetAlpha = 1.0f - (visualProgress * 0.2f);
-                    float scale = gatherThis ? easeTo(child.getScaleX(), targetScale, gatherLerp) : targetScale;
+                    float scale = gatherThis ? easeTo(gatherBase(child, "apple_cur_scale", child.getScaleX()), targetScale, gatherLerp) : targetScale;
+                    float alphaV = gatherThis ? easeTo(gatherBase(child, "apple_cur_alpha", child.getAlpha()), targetAlpha, gatherLerp) : targetAlpha;
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_scale", scale);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_alpha", alphaV);
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha(gatherThis ? easeTo(child.getAlpha(), targetAlpha, gatherLerp) : targetAlpha);
+                    child.setAlpha(alphaV);
 
                     XposedHelpers.setAdditionalInstanceField(child, "apple_child_index", effectiveRank);
                     float targetZ = 100f - effectiveRank;
@@ -1084,10 +1099,13 @@ public class RecentsHook {
                     float progress = Math.min(1.0f, absVirtualDistance / (measuredSize * 1.5f));
                     float targetScale = 1.0f + (progress * 0.04f);
                     float targetAlpha = 1.0f - (progress * 0.02f);
-                    float scale = gatherThis ? easeTo(child.getScaleX(), targetScale, gatherLerp) : targetScale;
+                    float scale = gatherThis ? easeTo(gatherBase(child, "apple_cur_scale", child.getScaleX()), targetScale, gatherLerp) : targetScale;
+                    float alphaV = gatherThis ? easeTo(gatherBase(child, "apple_cur_alpha", child.getAlpha()), targetAlpha, gatherLerp) : targetAlpha;
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_scale", scale);
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_cur_alpha", alphaV);
                     child.setScaleX(scale);
                     child.setScaleY(scale);
-                    child.setAlpha(gatherThis ? easeTo(child.getAlpha(), targetAlpha, gatherLerp) : targetAlpha);
+                    child.setAlpha(alphaV);
                 }
 
                 if (!isDismissing && dismissTranslationXField != null) {

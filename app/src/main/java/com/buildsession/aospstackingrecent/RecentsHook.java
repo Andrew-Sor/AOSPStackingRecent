@@ -147,7 +147,11 @@ public class RecentsHook {
                              && overviewStateClass != null && overviewStateClass.isInstance(param.args[0]);
                      // Entering the Overview state is part of the release animation of a gesture, so it must not
                      // cancel the "gather" animation (that made the cards stop short and then snap into place).
-                     if (newGesture || (enteringOverview && !isGestureActive(param.thisObject))) {
+                     // ...but the state change often arrives right after the gesture ended, while the running
+                     // card is still fading back in; keep remembering it for that short while.
+                     Object gu = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gather_until");
+                     boolean justGathered = gu instanceof Long && SystemClock.uptimeMillis() < (Long) gu + 800L;
+                     if (newGesture || (enteringOverview && !isGestureActive(param.thisObject) && !justGathered)) {
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_forced_hidden_view", null);
                          XposedHelpers.setAdditionalInstanceField(param.thisObject, "apple_gesture_running_view", null);
                      }

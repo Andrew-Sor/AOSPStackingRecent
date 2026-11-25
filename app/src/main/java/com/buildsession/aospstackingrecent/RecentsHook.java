@@ -289,8 +289,9 @@ public class RecentsHook {
                          // (our slide-out keeps Recents' content visible for a moment after the gesture ended).
                          boolean homePending = Boolean.TRUE.equals(
                                  XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_home_pending"));
-                         if (!isNewTaskEndTarget(param.thisObject) && !homePending
-                                 && !"HOME".equals(getEndTargetName(param.thisObject))) return;
+                         // (Switching to another app needs no forced hiding any more: in the linear hold layout
+                         // the old card no longer sits on top of the new one.)
+                         if (!homePending && !"HOME".equals(getEndTargetName(param.thisObject))) return;
                          Object card = XposedHelpers.getAdditionalInstanceField(param.thisObject, "apple_gesture_running_view");
                          if (!(card instanceof View)) {
                              card = getRunningTaskViewSafe(param.thisObject);
@@ -776,6 +777,24 @@ public class RecentsHook {
             } else if (endTargetName == null) {
                 XposedHelpers.setAdditionalInstanceField(recentsView, "apple_home_start", null);
             }
+            // Switching to another app: the gaps are measured from the old running card while the finger is
+            // down (the live window follows the finger), but once the switch is decided the card of the new
+            // app has to end up exactly where its window opens, i.e. with no offset at all.
+            float ntS = 0f;
+            if ("NEW_TASK".equals(endTargetName)) {
+                Object ns = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_nt_start");
+                long ntStart;
+                if (ns instanceof Long) {
+                    ntStart = (Long) ns;
+                } else {
+                    ntStart = frameNow;
+                    XposedHelpers.setAdditionalInstanceField(recentsView, "apple_nt_start", ntStart);
+                }
+                float lin = clamp((frameNow - ntStart) / 160f, 0f, 1f);
+                ntS = lin * lin * (3f - 2f * lin);
+            } else if (endTargetName == null) {
+                XposedHelpers.setAdditionalInstanceField(recentsView, "apple_nt_start", null);
+            }
             float[] holdExtra = null;
             if (holdPhase) {
                 int n = 0;
@@ -839,6 +858,7 @@ public class RecentsHook {
                             break;
                         }
                     }
+                    ref = ref + (fi - ref) * ntS;
                     for (int k = 0; k < n; k++) {
                         holdExtra[taskChild[k]] = delta * (k - ref);
                         if (homeT > 0f && k != ref) {

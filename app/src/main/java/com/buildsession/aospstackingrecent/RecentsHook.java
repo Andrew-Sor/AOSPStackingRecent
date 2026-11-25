@@ -958,8 +958,15 @@ public class RecentsHook {
 
                 // The hidden running card keeps its place and is not restyled (that would make it visible).
                 if (child == hiddenRunning) {
-                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", 0f);
+                    // While the finger is down its offset is 0 (the gaps are measured from this card); after the
+                    // release towards another app it moves away together with the new app's card, so the two
+                    // keep their gap and it does not jump when Launcher shows it again.
+                    float hiddenOffset = holdExtra != null ? holdExtra[i] : 0f;
+                    XposedHelpers.setAdditionalInstanceField(child, "apple_stack_offset", hiddenOffset);
                     XposedHelpers.setAdditionalInstanceField(child, "apple_target_z", 0f);
+                    if (holdExtra != null) {
+                        XposedHelpers.callMethod(child, "applyTranslationX");
+                    }
                     continue;
                 }
 

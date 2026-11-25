@@ -872,7 +872,7 @@ public class RecentsHook {
             try {
                 Object lastLogObj = XposedHelpers.getAdditionalInstanceField(recentsView, "apple_last_log");
                 long lastLog = lastLogObj instanceof Long ? (Long) lastLogObj : 0L;
-                if (isGestureActive(recentsView) && frameNow - lastLog > 150) {
+                if (isGestureActive(recentsView) && frameNow - lastLog > (endTargetName != null ? 40 : 150)) {
                     XposedHelpers.setAdditionalInstanceField(recentsView, "apple_last_log", frameNow);
                     StringBuilder sb = new StringBuilder("AOSPStackingRecent DIAG hold=").append(holdPhase)
                             .append(" gather=").append(gathering).append(" end=").append(endTargetName)
@@ -882,7 +882,7 @@ public class RecentsHook {
                             .append(" rvTx=").append(recentsView.getTranslationX())
                             .append(" W=").append(recentsView.getWidth())
                             .append(" center=").append(center).append(" measured=").append(measuredSize)
-                            .append(" holdExtra=").append(holdExtra != null)
+                            .append(" holdExtra=").append(holdExtra != null).append(" ntS=").append(ntS).append(" homeT=").append(homeT)
                             .append(" hiddenRunning=").append(hiddenRunning != null);
                     for (int i = 0; i < childCount; i++) {
                         View c = recentsView.getChildAt(i);
